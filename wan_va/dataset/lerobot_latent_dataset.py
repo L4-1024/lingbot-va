@@ -38,7 +38,7 @@ def construct_lerobot(
     )
 
 def construct_lerobot_multi_processor(config, 
-                                      num_init_worker=8,
+                                      num_init_worker=None,
                                       ):
     datasets_out_lst = []
     construct_func = partial(
@@ -47,6 +47,10 @@ def construct_lerobot_multi_processor(config,
     )
     repo_list = recursive_find_file(config.dataset_path, 'info.json')
     repo_list = [v.split('/meta/info.json')[0] for v in repo_list]
+    if num_init_worker is None:
+        num_init_worker = getattr(config, 'dataset_init_worker', 8)
+    if num_init_worker <= 1:
+        return [construct_func(repo_id) for repo_id in repo_list]
     with Pool(num_init_worker) as pool:
         datasets_out_lst = pool.map(construct_func, repo_list)
                 
@@ -71,7 +75,7 @@ class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         config,
-        num_init_worker=128,
+        num_init_worker=None,
     ):
         self._datasets = construct_lerobot_multi_processor(config, 
                                                            num_init_worker, 
@@ -142,7 +146,12 @@ class LatentLeRobotDataset(LeRobotDataset):
         self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
         
         self.latent_path = Path(repo_id) / 'latents'
-        self.empty_emb = torch.load(config.empty_emb_path, weights_only=False)
+        empty_emb_path = getattr(config, 'empty_emb_path', None)
+        self.empty_emb = (
+            torch.load(empty_emb_path, weights_only=False)
+            if empty_emb_path and os.path.exists(empty_emb_path)
+            else None
+        )
         self.config = config
         self.cfg_prob = config.cfg_prob
         self.used_video_keys = config.obs_cam_keys
@@ -245,7 +254,7 @@ class LatentLeRobotDataset(LeRobotDataset):
 
         text_emb = data_dict[f"{self.used_video_keys[0]}.text_emb"]
         if torch.rand(1).item() < self.cfg_prob:
-            text_emb = self.empty_emb
+            text_emb = self.empty_emb if self.empty_emb is not None else torch.zeros_like(text_emb)
 
         out_dict = dict(
             latents = cat_latent,

@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 import math
+import os
 from copy import deepcopy
 
 import torch
@@ -26,10 +27,10 @@ from torch.nn.attention.flex_attention import (
 )
 from functools import partial
 
-try:
-    from flash_attn_interface import flash_attn_func
-except:
-    from flash_attn import flash_attn_func
+# try:
+#     from flash_attn_interface import flash_attn_func
+# except:
+#     from flash_attn import flash_attn_func
 
 __all__ = ['WanTransformer3DModel']
 
@@ -40,12 +41,60 @@ def custom_sdpa(q, k, v):
     return out.transpose(1, 2)
 
 class FlexAttnFunc(nn.Module):
-    flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, dynamic=True, 
-    )
-    compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
+    flex_attn: ClassVar[Callable | None] = None
+    compiled_create_block_mask: ClassVar[Callable | None] = None
     attention_mask: ClassVar[BlockMask] = None
     cross_attention_mask: ClassVar[BlockMask] = None
+
+    @staticmethod
+    def _disable_compile():
+        return os.environ.get("WAN_VA_DISABLE_FLEX_COMPILE", "0") == "1"
+
+    @staticmethod
+    def _flex_attention():
+        if FlexAttnFunc._disable_compile():
+            return flex_attention
+        if FlexAttnFunc.flex_attn is None:
+            FlexAttnFunc.flex_attn = torch.compile(
+                flex_attention,
+                dynamic=True,
+            )
+        return FlexAttnFunc.flex_attn
+
+    @staticmethod
+    def _create_block_mask(mask_mod, B, H, Q_LEN, KV_LEN, device):
+        if FlexAttnFunc._disable_compile():
+            return create_block_mask(
+                mask_mod,
+                B,
+                H,
+                Q_LEN,
+                KV_LEN,
+                device=device,
+                _compile=False,
+            )
+        if FlexAttnFunc.compiled_create_block_mask is None:
+            FlexAttnFunc.compiled_create_block_mask = torch.compile(create_block_mask)
+        try:
+            return FlexAttnFunc.compiled_create_block_mask(
+                mask_mod,
+                B,
+                H,
+                Q_LEN,
+                KV_LEN,
+                device=device,
+                _compile=True,
+            )
+        except Exception:
+            return create_block_mask(
+                mask_mod,
+                B,
+                H,
+                Q_LEN,
+                KV_LEN,
+                device=device,
+                _compile=False,
+            )
 
     def __init__(
         self, 
@@ -78,14 +127,30 @@ class FlexAttnFunc(nn.Module):
 
         block_mask = FlexAttnFunc.cross_attention_mask if self.is_cross else FlexAttnFunc.attention_mask
 
-        x_out = FlexAttnFunc.flex_attn(q_varlen, k_varlen, v_varlen, block_mask=block_mask, kernel_options = {
-                                                    "BLOCK_M": 64,
-                                                    "BLOCK_N": 64,
-                                                    "BLOCK_M1": 32,
-                                                    "BLOCK_N1": 64,
-                                                    "BLOCK_M2": 64,
-                                                    "BLOCK_N2": 32,
-                                                })
+        kernel_options = {
+            "BLOCK_M": 64,
+            "BLOCK_N": 64,
+            "BLOCK_M1": 32,
+            "BLOCK_N1": 64,
+            "BLOCK_M2": 64,
+            "BLOCK_N2": 32,
+        }
+        try:
+            x_out = FlexAttnFunc._flex_attention()(
+                q_varlen,
+                k_varlen,
+                v_varlen,
+                block_mask=block_mask,
+                kernel_options=kernel_options,
+            )
+        except Exception:
+            x_out = flex_attention(
+                q_varlen,
+                k_varlen,
+                v_varlen,
+                block_mask=block_mask,
+                kernel_options=kernel_options,
+            )
 
         x_out = rearrange(x_out, "b n s d -> b s n d")
         return x_out
@@ -128,16 +193,16 @@ class FlexAttnFunc(nn.Module):
         noise_ids = F.pad(noise_ids, (0, padded_length), value=-1)
 
         mask_mod = FlexAttnFunc._get_mask_mod(seq_ids.long().to(device), frame_ids.long().to(device), noise_ids.long().to(device), window_size)
-        block_mask = FlexAttnFunc.compiled_create_block_mask(
-                mask_mod, 1, 1, len(seq_ids), len(seq_ids), device=device, _compile=True
-            )
+        block_mask = FlexAttnFunc._create_block_mask(
+            mask_mod, 1, 1, len(seq_ids), len(seq_ids), device=device
+        )
         FlexAttnFunc.attention_mask = block_mask
 
         text_seq_ids = torch.arange(B)[:, None].expand(-1, 512).flatten()
         mask_mod_cross = FlexAttnFunc._get_cross_mask_mod(seq_ids.long().to(device), text_seq_ids.long().to(device))
-        block_mask_cross = FlexAttnFunc.compiled_create_block_mask(
-                mask_mod_cross, 1, 1, len(seq_ids), len(text_seq_ids), device=device, _compile=True
-            )
+        block_mask_cross = FlexAttnFunc._create_block_mask(
+            mask_mod_cross, 1, 1, len(seq_ids), len(text_seq_ids), device=device
+        )
         FlexAttnFunc.cross_attention_mask = block_mask_cross
     
     @staticmethod
@@ -301,10 +366,11 @@ class WanAttention(torch.nn.Module):
         super().__init__()
         if attn_mode == 'torch':
             self.attn_op = custom_sdpa
-        elif attn_mode == 'flashattn':
-            self.attn_op = flash_attn_func
+        # elif attn_mode == 'flashattn':
+        #     self.attn_op = flash_attn_func
         elif attn_mode == 'flex':
-            self.attn_op = FlexAttnFunc(cross_attention_dim_head is not None)
+            self.attn_op = custom_sdpa
+            # FlexAttnFunc(cross_attention_dim_head is not None)
         else:
             raise ValueError(
                 f"Unsupported attention mode: {attn_mode}, only support torch and flashattn"

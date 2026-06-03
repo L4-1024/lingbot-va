@@ -1,1 +1,5 @@
 *.pyc
+.cache/
+.static_kernel_records.json
+
+torch_compile_debug/

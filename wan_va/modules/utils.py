@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 import torch
+from torch import nn
 from diffusers import AutoencoderKLWan
 from transformers import (
     T5TokenizerFast,
@@ -7,6 +8,100 @@ from transformers import (
 )
 
 from .model import WanTransformer3DModel
+
+
+def _set_submodule_tensor(module, tensor_name, tensor):
+    parts = tensor_name.split(".")
+    target = module
+    for part in parts[:-1]:
+        target = getattr(target, part)
+    leaf_name = parts[-1]
+
+    if leaf_name in target._parameters:
+        old_param = target._parameters[leaf_name]
+        target._parameters[leaf_name] = nn.Parameter(
+            tensor,
+            requires_grad=old_param.requires_grad,
+        )
+    elif leaf_name in target._buffers:
+        target._buffers[leaf_name] = tensor
+    else:
+        raise RuntimeError(f"Cannot materialize unknown tensor: {tensor_name}")
+
+
+def _empty_like_on_cpu(tensor):
+    return torch.empty(
+        tensor.shape,
+        dtype=tensor.dtype,
+        layout=tensor.layout,
+        device="cpu",
+    )
+
+
+def _init_missing_transformer_weights(model):
+    named_params = dict(model.named_parameters())
+    named_buffers = dict(model.named_buffers())
+    materialized_modules = set()
+
+    for name, param in list(named_params.items()):
+        if not param.is_meta:
+            continue
+
+        source_name = None
+        if name.startswith("condition_embedder_action."):
+            source_name = name.replace(
+                "condition_embedder_action.",
+                "condition_embedder.",
+                1,
+            )
+
+        if source_name and source_name in named_params and not named_params[source_name].is_meta:
+            value = named_params[source_name].detach().to(device="cpu", dtype=param.dtype).clone()
+        else:
+            value = _empty_like_on_cpu(param)
+            materialized_modules.add(name.rsplit(".", 1)[0])
+        _set_submodule_tensor(model, name, value)
+
+    named_buffers = dict(model.named_buffers())
+    for name, buffer in list(named_buffers.items()):
+        if not buffer.is_meta:
+            continue
+
+        source_name = None
+        if name.startswith("condition_embedder_action."):
+            source_name = name.replace(
+                "condition_embedder_action.",
+                "condition_embedder.",
+                1,
+            )
+
+        if source_name and source_name in named_buffers and not named_buffers[source_name].is_meta:
+            value = named_buffers[source_name].detach().to(device="cpu", dtype=buffer.dtype).clone()
+        else:
+            value = torch.zeros(
+                buffer.shape,
+                dtype=buffer.dtype,
+                layout=buffer.layout,
+                device="cpu",
+            )
+            materialized_modules.add(name.rsplit(".", 1)[0])
+        _set_submodule_tensor(model, name, value)
+
+    for module_name in sorted(materialized_modules):
+        module = model.get_submodule(module_name)
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+
+    remaining_meta = [
+        name for name, param in model.named_parameters() if param.is_meta
+    ] + [
+        name for name, buffer in model.named_buffers() if buffer.is_meta
+    ]
+    if remaining_meta:
+        raise RuntimeError(
+            "Transformer checkpoint left meta tensors uninitialized: "
+            + ", ".join(remaining_meta)
+        )
 
 
 def load_vae(
@@ -44,11 +139,17 @@ def load_transformer(
     torch_device,
     **kwargs
 ):
-    model = WanTransformer3DModel.from_pretrained(
+    loaded = WanTransformer3DModel.from_pretrained(
         transformer_path,
         torch_dtype=torch_dtype,
+        output_loading_info=True,
         **kwargs
     )
+    if isinstance(loaded, tuple):
+        model, _loading_info = loaded
+    else:
+        model = loaded
+    _init_missing_transformer_weights(model)
     return model.to(torch_device)
 
 
