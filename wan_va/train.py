@@ -19,6 +19,10 @@ from torch.distributed.checkpoint.state_dict import (
 from safetensors.torch import save_file, load_file
 import json
 
+
+from npu_adapter import adapt_to_accelerator_device
+adapt_to_accelerator_device()
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from configs import VA_CONFIGS
@@ -26,6 +30,7 @@ from distributed.fsdp import shard_model, apply_ac
 from distributed.util import (
     _configure_model, 
     init_distributed, 
+    dist_barrier,
     dist_mean, 
     dist_max
 )
@@ -376,8 +381,7 @@ class Trainer:
                 logger.info(f"Checkpoint saved successfully at step {self.step}")
 
             # Synchronize all processes after saving
-            if dist.is_initialized():
-                dist.barrier()
+            dist_barrier()
 
         except Exception as e:
             if self.config.rank == 0:
@@ -385,8 +389,7 @@ class Trainer:
                 import traceback
                 logger.error(traceback.format_exc())
             # Ensure all processes stay synchronized even on error
-            if dist.is_initialized():
-                dist.barrier()
+            dist_barrier()
 
     def _load_training_state(self, checkpoint_path):
         """Load training state (optimizer + step) after FSDP and optimizer creation."""
@@ -416,8 +419,7 @@ class Trainer:
             logger.info(f"Training state loaded, resuming from step {self.step}")
 
         # Synchronize all ranks
-        if dist.is_initialized():
-            dist.barrier()
+        dist_barrier()
 
     def train(self):
         """Main training loop - train by steps instead of epochs."""
@@ -496,8 +498,7 @@ class Trainer:
                         logger.info(f"Starting save model at step {self.step}")
                     self.save_checkpoint()
 
-            if dist.is_initialized():
-                dist.barrier()
+            dist_barrier()
 
         progress_bar.close()
         logger.info("Training completed!")
