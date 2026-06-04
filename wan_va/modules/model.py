@@ -26,6 +26,7 @@ from torch.nn.attention.flex_attention import (
     or_masks
 )
 from functools import partial
+import os
 
 # try:
 #     from flash_attn_interface import flash_attn_func
@@ -34,6 +35,8 @@ from functools import partial
 
 __all__ = ['WanTransformer3DModel']
 
+# Check if flex attention torch.compile should be disabled (e.g. on Ascend NPU)
+_DISABLE_FLEX_COMPILE = os.environ.get("WAN_VA_DISABLE_FLEX_COMPILE", "0") == "1"
 
 def custom_sdpa(q, k, v):
     out = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2),
@@ -46,10 +49,14 @@ def _env_flag_enabled(name):
 
 
 class FlexAttnFunc(nn.Module):
-    flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, dynamic=True, 
-    )
-    compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
+    if _DISABLE_FLEX_COMPILE:
+        flex_attn: ClassVar[Callable] = flex_attention
+        compiled_create_block_mask: ClassVar[Callable] = create_block_mask
+    else:
+        flex_attn: ClassVar[Callable] = torch.compile(
+            flex_attention, dynamic=True, 
+        )
+        compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
     attention_mask: ClassVar[BlockMask] = None
     cross_attention_mask: ClassVar[BlockMask] = None
 
@@ -779,14 +786,15 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                       condition_action_hidden_states.shape[1],
                       padded_length]
 
-        FlexAttnFunc.init_mask(latent_dict['noisy_latents'].shape, 
-                               action_dict['noisy_latents'].shape, 
-                               padded_length, 
-                               input_dict["chunk_size"],
-                               window_size=input_dict['window_size'],
-                               patch_size=self.patch_size,
-                               device=hidden_states.device
-                               )
+        if not _DISABLE_FLEX_COMPILE:
+            FlexAttnFunc.init_mask(latent_dict['noisy_latents'].shape, 
+                                   action_dict['noisy_latents'].shape, 
+                                   padded_length, 
+                                   input_dict["chunk_size"],
+                                   window_size=input_dict['window_size'],
+                                   patch_size=self.patch_size,
+                                   device=hidden_states.device
+                                   )
 
         for block in self.blocks:
             hidden_states = block(hidden_states,

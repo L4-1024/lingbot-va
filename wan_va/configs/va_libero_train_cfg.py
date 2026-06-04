@@ -6,7 +6,7 @@ import os
 va_libero_train_cfg = EasyDict(__name__='Config: VA libero train')
 va_libero_train_cfg.update(va_libero_cfg)
 
-va_libero_train_cfg.dataset_path = '/inspire/sj-ssd3/project/embodied-multimodality-ascend/public/datasets/Robbyant/libero-long-lerobot/libero_10/0.0.0/libero_10_0.0.0_lerobot_part_0'
+va_libero_train_cfg.dataset_path = '/path/to/data'
 va_libero_train_cfg.empty_emb_path = os.path.join(va_libero_train_cfg.dataset_path, 'empty_emb.pt')
 va_libero_train_cfg.enable_wandb = False
 va_libero_train_cfg.dataset_init_worker = 4
