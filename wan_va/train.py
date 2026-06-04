@@ -45,7 +45,8 @@ from utils import (
     sample_timestep_id,
     data_seq_to_patch,
     warmup_constant_lambda,
-    FlowMatchScheduler
+    FlowMatchScheduler,
+    adapt_to_accelerator_device
 )
 
 from dataset import MultiLatentLeRobotDataset
@@ -550,5 +551,6 @@ def main():
 
 
 if __name__ == "__main__":
+    adapt_to_accelerator_device()
     init_logger()
     main()
