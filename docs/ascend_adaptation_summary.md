@@ -2,10 +2,12 @@
 
 ## 适配目标
 
-将 `libero_train` 训练流程从 CUDA 迁移到昇腾 NPU，8 卡运行：
+将 `libero_train` 和'robotwin_train'的训练流程从 CUDA 迁移到昇腾 NPU，8 卡运行：
 
 ```bash
 NGPU=8 CONFIG_NAME='libero_train' bash script/run_va_posttrain.sh
+
+NGPU=8 CONFIG_NAME='robotwin_train' bash script/run_va_posttrain.sh
 ```
 
 核心原则：**代码保持** **`cuda`/`nccl`** **表面 API 不变**，由 `npu_adapter.adapt_to_accelerator_device()` 运行时自动映射到 NPU/HCCL。
@@ -21,6 +23,8 @@ NGPU=8 CONFIG_NAME='libero_train' bash script/run_va_posttrain.sh
 
 ```bash
 NGPU=8 CONFIG_NAME='libero_train' bash script/run_va_posttrain.sh
+
+NGPU=8 CONFIG_NAME='robotwin_train' bash script/run_va_posttrain.sh
 ```
 
 ## 关键改动
